@@ -18,8 +18,10 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: write
+      pages: read
     steps:
       - uses: actions/checkout@v6
       - name: Import the verified snapshot once
@@ -29,6 +31,7 @@ jobs:
           script: |
             const fs = require('node:fs');
             const crypto = require('node:crypto');
+            const {execFileSync} = require('node:child_process');
             const base = 'https://f9eea0eac8f94e078a67525ab0a0f87f.app-tencent.workbuddy.link/';
             const expected = {
               'index.html': 'fe4853d4b1d1883d3130d04e36a7251f532335c44c8b22af625322dee78dc5ea',
@@ -36,9 +39,7 @@ jobs:
             };
             const snapshot = [];
             for (const [name, hash] of Object.entries(expected)) {
-              const response = await fetch(base + name + '?sharecode=BLP56YWDXA', {signal: AbortSignal.timeout(45000)});
-              if (!response.ok) throw new Error('Snapshot download failed: ' + name + ' ' + response.status);
-              const data = Buffer.from(await response.arrayBuffer());
+              const data = execFileSync('curl', ['--fail', '--location', '--ipv4', '--silent', '--show-error', '--connect-timeout', '30', '--max-time', '60', base + name + '?sharecode=BLP56YWDXA'], {maxBuffer: 2000000});
               if (crypto.createHash('sha256').update(data).digest('hex') !== hash) throw new Error('Snapshot checksum mismatch: ' + name);
               snapshot.push({path: 'docs/' + name, data});
             }
