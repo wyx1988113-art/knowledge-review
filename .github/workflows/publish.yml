@@ -1,0 +1,81 @@
+name: Publish knowledge review
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - ".github/workflows/publish.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: knowledge-review-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - name: Import the verified snapshot once
+        if: ${{ hashFiles('docs/index.html') == '' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('node:fs');
+            const crypto = require('node:crypto');
+            const base = 'https://f9eea0eac8f94e078a67525ab0a0f87f.app-tencent.workbuddy.link/';
+            const expected = {
+              'index.html': 'fe4853d4b1d1883d3130d04e36a7251f532335c44c8b22af625322dee78dc5ea',
+              'manifest.webmanifest': 'dac10081b1a9b516e54388cb95937d0eb1f8a7f4738978f3d6b46307a56ef0ed'
+            };
+            const snapshot = [];
+            for (const [name, hash] of Object.entries(expected)) {
+              const response = await fetch(base + name + '?sharecode=BLP56YWDXA', {signal: AbortSignal.timeout(45000)});
+              if (!response.ok) throw new Error('Snapshot download failed: ' + name + ' ' + response.status);
+              const data = Buffer.from(await response.arrayBuffer());
+              if (crypto.createHash('sha256').update(data).digest('hex') !== hash) throw new Error('Snapshot checksum mismatch: ' + name);
+              snapshot.push({path: 'docs/' + name, data});
+            }
+            const html = snapshot[0].data.toString('utf8');
+            if (!html.includes('const CARDS = ') || !html.includes('wikiReview.v1') || !html.includes('读后回顾')) throw new Error('Unexpected review content');
+            const cards = JSON.parse(html.split('const CARDS = ')[1].split(';\nconst KEY')[0]);
+            if (cards.length !== 172 || new Set(cards.map(c => c.id)).size !== 172) throw new Error('Card count mismatch');
+            const ref = await github.rest.git.getRef({...context.repo, ref: 'heads/main'});
+            if (ref.data.object.sha !== context.sha) throw new Error('Main changed during import; refusing to overwrite newer work');
+            const parent = await github.rest.git.getCommit({...context.repo, commit_sha: context.sha});
+            const tree = [];
+            for (const file of snapshot) {
+              const blob = await github.rest.git.createBlob({...context.repo, content: file.data.toString('base64'), encoding: 'base64'});
+              tree.push({path: file.path, mode: '100644', type: 'blob', sha: blob.data.sha});
+            }
+            const createdTree = await github.rest.git.createTree({...context.repo, base_tree: parent.data.tree.sha, tree});
+            const commit = await github.rest.git.createCommit({...context.repo, message: 'Import verified 172-card review website', tree: createdTree.data.sha, parents: [context.sha]});
+            await github.rest.git.updateRef({...context.repo, ref: 'heads/main', sha: commit.data.sha, force: false});
+            fs.mkdirSync('docs', {recursive: true});
+            for (const file of snapshot) fs.writeFileSync(file.path, file.data);
+            core.info('Stored the complete 172-card snapshot in this repository: ' + commit.data.sha);
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+      - name: Upload the static website only
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: docs
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
